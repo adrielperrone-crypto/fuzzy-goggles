@@ -1,0 +1,131 @@
+
+name: ADR RDP Gaming Edition
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure Core RDP Settings
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1 -Force
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer -Value 2 -Force
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Create RDP User ADR
+        shell: pwsh
+        run: |
+          $password = "ADR232323"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name ADR -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name ADR -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          } else {
+            Set-LocalUser -Name ADR -Password $securePass
+          }
+
+          Add-LocalGroupMember -Group Administrators -Member ADR -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member ADR -ErrorAction SilentlyContinue
+
+      - name: Install Gaming Applications
+        shell: pwsh
+        run: |
+          $apps = @(
+            "7zip.7zip",
+            "Google.Chrome",
+            "Mozilla.Firefox",
+            "Valve.Steam",
+            "EpicGames.EpicGamesLauncher"
+          )
+
+          foreach ($app in $apps) {
+            winget install --id $app --exact --silent --accept-package-agreements --accept-source-agreements
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Installation failed or application unavailable: $app"
+            }
+          }
+
+      - name: Prepare Gaming Folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path C:\Games -Force
+          New-Item -ItemType Directory -Path C:\Downloads -Force
+
+          powercfg /setactive SCHEME_MIN
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+
+          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
+
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$env:TS_AUTHKEY" --hostname="adr-rdp-$env:GITHUB_RUN_ID"
+
+          $tsIP = $null
+
+          for ($i = 0; $i -lt 20; $i++) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null | Select-Object -First 1
+
+            if ($tsIP) { break }
+
+            Start-Sleep -Seconds 5
+          }
+
+          if (-not $tsIP) {
+            throw "Tailscale IP not assigned"
+          }
+
+          "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        shell: pwsh
+        run: |
+          Write-Host "Testing RDP connection..."
+
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+
+          if ($result.TcpTestSucceeded) {
+            Write-Host "RDP connectivity successful"
+          } else {
+            Write-Warning "RDP connectivity test failed"
+          }
+
+      - name: Display Connection Information
+        shell: pwsh
+        run: |
+          Write-Host "=============================="
+          Write-Host "ADR RDP GAMING"
+          Write-Host "IP: $env:TAILSCALE_IP"
+          Write-Host "USER: ADR"
+          Write-Host "PASSWORD: ADR232323"
+          Write-Host "=============================="
+
+      - name: Maintain Connection
+        shell: pwsh
+        run: |
+          while ($true) {
+            Write-Host "ADR RDP Active: $(Get-Date)"
+            Start-Sleep -Seconds 300
+          }
+          
